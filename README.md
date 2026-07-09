@@ -1,0 +1,1 @@
+# syncs-bot-battle-hackathon
