@@ -4,239 +4,187 @@ from lib.interface.events.moves.move_player import MovePlayer
 from lib.interface.queries.query_move import QueryMovePlayer
 from lib.models.penguin_model import DirectionModel
 
+MAP_MAX = 60.0
+EAT_RATIO = 1.2
+SPLIT_RATIO = 1.697056
+MAX_BLOBS = 16
+SPLIT_REACH = 15.0
 
-def choose_move(game: Game) -> tuple[float, float, bool]:
-    my_blobs = game.state.me.blobs
-    if not my_blobs:
-        return (1.0, 0.0, False)
 
-    largest_blob = max(my_blobs.values(), key=lambda b: b.radius)
-    my_x, my_y = largest_blob.pos
-    my_r = largest_blob.radius
+class BotProfile:
+    def __init__(self):
+        self.last_pos = None
+        self.dumb_moves = 0
+        self.smart_moves = 0
+        self.risk_score = 1.0
+
+
+def calculate_move(query: QueryMovePlayer, profiles: dict) -> MovePlayer:
+    if not query.you.alive or not query.you.blobs:
+        return MovePlayer(
+            player_id=query.you.player_id,
+            direction=DirectionModel(x=1.0, y=0.0),
+            split=False
+        )
+
+    my_largest = max(query.you.blobs, key=lambda b: b.radius)
+    my_x, my_y = my_largest.pos
+    my_r = my_largest.radius
     my_mass = my_r ** 2
-    arena_size = getattr(game.state, 'arena_size', 60.0)
-    center_x, center_y = arena_size / 2.0, arena_size / 2.0
+    my_speed = max(0.25, 1.1 - 0.08 * my_r)
 
-    threats = []
-    prey = []
-    neutrals = []
-    all_enemies = []
+    vec_x, vec_y = 0.0, 0.0
+    do_split = False
 
-    for enemy in game.state.visible_blobs:
-        if enemy.player_id == game.state.me.player_id:
+    wall_padding = 0.1
+    dist_left = max(my_x, wall_padding)
+    dist_right = max(MAP_MAX - my_x, wall_padding)
+    dist_bottom = max(my_y, wall_padding)
+    dist_top = max(MAP_MAX - my_y, wall_padding)
+
+    vec_x += (35.0 / (dist_left ** 2)) - (35.0 / (dist_right ** 2))
+    vec_y += (35.0 / (dist_bottom ** 2)) - (35.0 / (dist_top ** 2))
+
+    for enemy in query.visible_blobs:
+        if enemy.player_id == query.you.player_id:
             continue
 
-        dist = math.hypot(enemy.pos[0] - my_x, enemy.pos[1] - my_y)
-        if dist == 0:
-            continue
+        enemy_id = (enemy.player_id, getattr(enemy, 'blob_id', 0))
+        if enemy_id not in profiles:
+            profiles[enemy_id] = BotProfile()
 
-        all_enemies.append(enemy)
+        prof = profiles[enemy_id]
         enemy_mass = enemy.radius ** 2
 
-        if enemy_mass > 1.2 * my_mass:
-            threats.append((enemy, dist))
-        elif my_mass > 1.2 * enemy_mass:
-            prey.append((enemy, dist))
-        else:
-            neutrals.append((enemy, dist))
+        if prof.last_pos:
+            move_dx = enemy.pos[0] - prof.last_pos[0]
+            move_dy = enemy.pos[1] - prof.last_pos[1]
+            if move_dx != 0 or move_dy != 0:
+                rel_dx = my_x - prof.last_pos[0]
+                rel_dy = my_y - prof.last_pos[1]
+                dot_prod = (move_dx * rel_dx + move_dy * rel_dy)
 
-    safe_food = []
-    if game.state.visible_food:
-        for food in game.state.visible_food:
-            my_dist_sq = (food.pos[0] - my_x) ** 2 + (food.pos[1] - my_y) ** 2
-            is_contested = False
-            for enemy in all_enemies:
-                enemy_dist_sq = (
-                    food.pos[0] - enemy.pos[0]) ** 2 + (food.pos[1] - enemy.pos[1]) ** 2
-                if enemy_dist_sq < my_dist_sq:
-                    is_contested = True
-                    break
+                if my_mass > enemy_mass * EAT_RATIO:
+                    if dot_prod > 0:
+                        prof.dumb_moves += 1
+                    else:
+                        prof.smart_moves += 1
+                elif enemy_mass > my_mass * EAT_RATIO:
+                    if dot_prod > 0:
+                        prof.smart_moves += 1
 
-            if not is_contested:
-                if 4.0 < food.pos[0] < arena_size - 4.0 and 4.0 < food.pos[1] < arena_size - 4.0:
-                    safe_food.append((food, math.sqrt(my_dist_sq)))
+        total_evals = prof.dumb_moves + prof.smart_moves
+        if total_evals > 5:
+            prof.risk_score = max(
+                0.4, min(2.5, (prof.smart_moves + 1) / (prof.dumb_moves + 1)))
 
-    best_food_cluster = None
-    best_cluster_score = -1.0
+        prof.last_pos = enemy.pos
 
-    if safe_food:
-        for f, d in safe_food:
-            neighbors = sum(1 for other_f, _ in safe_food if math.hypot(
-                f.pos[0] - other_f.pos[0], f.pos[1] - other_f.pos[1]) < 6.0)
+        dx = enemy.pos[0] - my_x
+        dy = enemy.pos[1] - my_y
+        dist_sq = dx*dx + dy*dy
+        if dist_sq < 0.0001:
+            continue
 
-            f_dist_center = math.hypot(
-                f.pos[0] - center_x, f.pos[1] - center_y)
-            edge_penalty = 1.0 + (f_dist_center / (arena_size / 2.0))
+        dist = math.sqrt(dist_sq)
+        dir_x, dir_y = dx / dist, dy / dist
+        enemy_speed = max(0.25, 1.1 - 0.08 * enemy.radius)
 
-            score = (neighbors + 1) / (d * edge_penalty + 0.1)
-            if score > best_cluster_score:
-                best_cluster_score = score
-                best_food_cluster = f
+        if enemy.radius >= my_r * EAT_RATIO:
+            force = 0.0
+            base_flee = -800.0 if (enemy.radius >= my_r * SPLIT_RATIO and dist <
+                                   (SPLIT_REACH + enemy.radius)) else -150.0
+            if enemy.radius < my_r * SPLIT_RATIO:
+                base_flee = -300.0
 
-    dx, dy, do_split = 0.0, 0.0, False
-    action_chosen = False
+            force = (base_flee * prof.risk_score) / dist_sq
 
-    active_threats = [t for t in threats if t[1] < (t[0].radius * 4.0 + my_r)]
-    if active_threats and not action_chosen:
-        closest_threat, threat_dist = min(active_threats, key=lambda t: t[1])
-        threat_mass = closest_threat.radius ** 2
+            vec_x += dir_x * force
+            vec_y += dir_y * force
 
-        safe_virus = None
-        if game.state.visible_viruses:
-            valid_viruses = [
-                v for v in game.state.visible_viruses if threat_mass > 1.2 * (v.radius ** 2)]
-            if valid_viruses:
-                safe_virus = min(valid_viruses, key=lambda v: math.hypot(
-                    v.pos[0] - my_x, v.pos[1] - my_y))
+            tangent_x, tangent_y = -dir_y, dir_x
+            if (tangent_x > 0 and dist_right < dist_left) or (tangent_x < 0 and dist_left < dist_right):
+                tangent_x = -tangent_x
+            if (tangent_y > 0 and dist_top < dist_bottom) or (tangent_y < 0 and dist_bottom < dist_top):
+                tangent_y = -tangent_y
 
-        if safe_virus:
-            vx, vy = safe_virus.pos
-            tx, ty = closest_threat.pos
-            tv_dist = math.hypot(vx - tx, vy - ty)
+            slide_force = abs(force) * 0.6 * prof.risk_score
+            vec_x += tangent_x * slide_force
+            vec_y += tangent_y * slide_force
 
-            if tv_dist > 0:
-                dir_x = (vx - tx) / tv_dist
-                dir_y = (vy - ty) / tv_dist
-                shadow_x = vx + dir_x * (safe_virus.radius + my_r)
-                shadow_y = vy + dir_y * (safe_virus.radius + my_r)
-                sdx = shadow_x - my_x
-                sdy = shadow_y - my_y
-                s_dist = math.hypot(sdx, sdy)
+        elif my_r >= enemy.radius * EAT_RATIO:
+            can_split_kill = (my_r >= enemy.radius * SPLIT_RATIO)
+            is_faster = enemy_speed >= my_speed
+            wall_dist_x = min(enemy.pos[0], MAP_MAX - enemy.pos[0])
+            wall_dist_y = min(enemy.pos[1], MAP_MAX - enemy.pos[1])
+            is_cornered = wall_dist_x < 8.0 or wall_dist_y < 8.0
 
-                if s_dist > 0:
-                    dx, dy = (sdx / s_dist) * 15.0, (sdy / s_dist) * 15.0
-                    action_chosen = True
+            if can_split_kill:
+                force = (200.0 / prof.risk_score) / dist
+                vec_x += dir_x * force
+                vec_y += dir_y * force
 
-        if not action_chosen:
-            tdx = my_x - closest_threat.pos[0]
-            tdy = my_y - closest_threat.pos[1]
-            dx += (tdx / threat_dist) * 10.0
-            dx -= (tdy / threat_dist) * 5.0
-            dy += (tdx / threat_dist) * 5.0
-            action_chosen = True
-
-    if not action_chosen:
-        active_prey = [p for p in prey if p[1] < max(25.0, my_r * 4.0)]
-        if active_prey:
-            active_prey.sort(key=lambda p: p[1])
-            for closest_prey, dist in active_prey:
-                if dist > 12.0 and best_food_cluster:
-                    if math.hypot(best_food_cluster.pos[0] - my_x, best_food_cluster.pos[1] - my_y) < 5.0:
-                        continue
-
-                path_blocked = False
-                if game.state.visible_viruses:
-                    for virus in game.state.visible_viruses:
-                        if my_mass > 1.2 * (virus.radius ** 2):
-                            ABx = closest_prey.pos[0] - my_x
-                            ABy = closest_prey.pos[1] - my_y
-                            ACx = virus.pos[0] - my_x
-                            ACy = virus.pos[1] - my_y
-
-                            dot_AB = ABx**2 + ABy**2
-                            if dot_AB == 0:
-                                continue
-
-                            t = max(0.0, min(1.0, (ACx*ABx + ACy*ABy) / dot_AB))
-                            closest_x = my_x + t * ABx
-                            closest_y = my_y + t * ABy
-                            dist_to_virus = math.hypot(
-                                closest_x - virus.pos[0], closest_y - virus.pos[1])
-
-                            if dist_to_virus < (virus.radius + my_r + 1.0):
-                                path_blocked = True
-                                break
-
-                if path_blocked:
-                    continue
-
-                px, py = closest_prey.pos
-                wall_dists = {'left': px, 'right': arena_size -
-                              px, 'top': py, 'bottom': arena_size - py}
-                nearest_wall = min(wall_dists, key=wall_dists.get)
-
-                target_x, target_y = px, py
-                offset = closest_prey.radius * 2.0
-                if nearest_wall == 'left':
-                    target_x -= offset
-                elif nearest_wall == 'right':
-                    target_x += offset
-                elif nearest_wall == 'top':
-                    target_y -= offset
-                elif nearest_wall == 'bottom':
-                    target_y += offset
-
-                dx = target_x - my_x
-                dy = target_y - my_y
-
-                enemy_mass = closest_prey.radius ** 2
-                if my_mass > 2.4 * enemy_mass and my_r > 3.0:
-                    if my_r < dist < 4.0 * my_r:
-                        do_split = True
-
-                action_chosen = True
-                break
-
-    if not action_chosen:
-        base_dx, base_dy = 0.0, 0.0
-
-        close_neutrals = [n for n in neutrals if n[1] < 15.0]
-        for enemy, dist in close_neutrals:
-            if dist > 0:
-                ndx = my_x - enemy.pos[0]
-                ndy = my_y - enemy.pos[1]
-                base_dx += (ndx / dist) * 5.0
-                base_dy += (ndy / dist) * 5.0
-                base_dx -= (ndy / dist) * 3.0
-                base_dy += (ndx / dist) * 3.0
-
-        if best_food_cluster:
-            fdx = best_food_cluster.pos[0] - my_x
-            fdy = best_food_cluster.pos[1] - my_y
-            f_dist = math.hypot(fdx, fdy)
-            if f_dist > 0:
-                base_dx += (fdx / f_dist) * 10.0
-                base_dy += (fdy / f_dist) * 10.0
-
-                if my_r > 4.0 and len(my_blobs) < 3:
+                if dist < SPLIT_REACH + enemy.radius and len(query.you.blobs) < MAX_BLOBS and my_mass > 4.0:
                     do_split = True
+
+            elif not is_faster or is_cornered or prof.risk_score < 0.7:
+                force = (120.0 / prof.risk_score) / dist
+                vec_x += dir_x * force
+                vec_y += dir_y * force
+
         else:
-            cdx, cdy = center_x - my_x, center_y - my_y
-            c_dist = math.hypot(cdx, cdy)
-            if c_dist > 0:
-                base_dx += (cdx / c_dist) * 3.0
-                base_dy += (cdy / c_dist) * 3.0
+            force = (-20.0 * prof.risk_score) / dist_sq
+            vec_x += dir_x * force
+            vec_y += dir_y * force
+            vec_x -= dir_y * (abs(force) * 0.8)
+            vec_y += dir_x * (abs(force) * 0.8)
 
-        dx, dy = base_dx, base_dy
+    if query.visible_viruses and my_r > 1.64:
+        for virus in query.visible_viruses:
+            if my_mass > 1.2 * (virus.radius ** 2):
+                dx = virus.pos[0] - my_x
+                dy = virus.pos[1] - my_y
+                dist_sq = dx*dx + dy*dy
+                if 0.0001 < dist_sq < 150.0:
+                    dist = math.sqrt(dist_sq)
+                    force = -200.0 / dist_sq
+                    vec_x += (dx / dist) * force
+                    vec_y += (dy / dist) * force
+                    vec_x -= (dy / dist) * abs(force)
+                    vec_y += (dx / dist) * abs(force)
 
-    margin = 8.0
-    if my_x < margin:
-        dx += (margin - my_x) * 20.0
-    elif my_x > arena_size - margin:
-        dx -= (my_x - (arena_size - margin)) * 20.0
-    if my_y < margin:
-        dy += (margin - my_y) * 20.0
-    elif my_y > arena_size - margin:
-        dy -= (my_y - (arena_size - margin)) * 20.0
+    if query.visible_food:
+        for food in query.visible_food:
+            dx = food.pos[0] - my_x
+            dy = food.pos[1] - my_y
+            dist_sq = dx*dx + dy*dy
+            if dist_sq > 0.0001:
+                force = 15.0 / dist_sq
+                vec_x += (dx / math.sqrt(dist_sq)) * force
+                vec_y += (dy / math.sqrt(dist_sq)) * force
 
-    return (dx, dy, do_split)
+    mag = math.sqrt(vec_x**2 + vec_y**2)
+    if mag < 0.0001:
+        norm_x, norm_y = 1.0, 0.0
+    else:
+        norm_x = vec_x / mag
+        norm_y = vec_y / mag
+
+    return MovePlayer(
+        player_id=query.you.player_id,
+        direction=DirectionModel(x=norm_x, y=norm_y),
+        split=do_split
+    )
 
 
 def main() -> None:
     game = Game()
-
+    profiles = {}
     while True:
         query = game.get_next_query()
         match query:
             case QueryMovePlayer():
-                dx, dy, split = choose_move(game)
-                game.send_move(
-                    MovePlayer(
-                        player_id=game.state.me.player_id,
-                        direction=DirectionModel(x=dx, y=dy),
-                        split=split
-                    )
-                )
+                game.send_move(calculate_move(query, profiles))
             case _:
                 raise RuntimeError(f"Unsupported query type: {type(query)}")
 

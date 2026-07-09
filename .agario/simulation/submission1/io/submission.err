@@ -1,0 +1,14 @@
+Traceback (most recent call last):
+  File "/Users/kevinphan/Desktop/hackathons/syncs-bot-battle-hackathon/bots/richard_bot.py", line 160, in <module>
+    main()
+    ~~~~^^
+  File "/Users/kevinphan/Desktop/hackathons/syncs-bot-battle-hackathon/bots/richard_bot.py", line 150, in main
+    query = game.get_next_query()
+  File "/Users/kevinphan/Desktop/hackathons/syncs-bot-battle-hackathon/.venv/lib/python3.14/site-packages/helper/game.py", line 16, in get_next_query
+    query = self.connection.get_next_query()
+  File "/Users/kevinphan/Desktop/hackathons/syncs-bot-battle-hackathon/.venv/lib/python3.14/site-packages/helper/interface.py", line 53, in get_next_query
+    return QueryTypeAdapter.model_validate_json(self._receive()).root
+                                                ~~~~~~~~~~~~~^^
+  File "/Users/kevinphan/Desktop/hackathons/syncs-bot-battle-hackathon/.venv/lib/python3.14/site-packages/helper/interface.py", line 28, in _receive
+    raise EOFError("Engine closed the pipe.")
+EOFError: Engine closed the pipe.
