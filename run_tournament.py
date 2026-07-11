@@ -4,16 +4,17 @@ import json
 import os
 
 # --- CONFIGURATION ---
-ITERATIONS = 50  # Change this number to run more or fewer matches
+ITERATIONS = 200  # Change this number to run more or fewer matches
 
 # The exact command you use to run the simulation
 COMMAND = [
     "uv", "run", "simulation", "--headless",
     "1:bots/kevin_bot.py",
-    "3:bots/richard_bot.py",
+    "2:bots/richard_bot.py",
     "2:bots/default_bot.py",
     "1:bots/kevin_bot_og.py",
-    "1:bots/kevin_bot_cld.py"
+    "1:bots/kevin_bot_cld1.py",
+    "1:bots/kevin_bot_cld2.py"
 ]
 
 # Path to where the engine saves the results
@@ -24,11 +25,11 @@ BOT_MAP = {
     0: "kevin_bot.py",
     1: "richard_bot.py",
     2: "richard_bot.py",
-    3: "richard_bot.py",
+    3: "default_bot.py",
     4: "default_bot.py",
-    5: "default_bot.py",
-    6: "kevin_bot_og.py",
-    7: "kevin_bot_cld.py"
+    5: "kevin_bot_og.py",
+    6: "kevin_bot_cld1.py",
+    7: "kevin_bot_cld2.py"
 }
 
 
