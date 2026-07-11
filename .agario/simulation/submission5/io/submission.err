@@ -1,8 +1,8 @@
 Traceback (most recent call last):
-  File "/Users/kevinphan/Desktop/hackathons/syncs-bot-battle-hackathon/bots/richard_bot.py", line 160, in <module>
+  File "/Users/kevinphan/Desktop/hackathons/syncs-bot-battle-hackathon/bots/default_bot.py", line 37, in <module>
     main()
     ~~~~^^
-  File "/Users/kevinphan/Desktop/hackathons/syncs-bot-battle-hackathon/bots/richard_bot.py", line 150, in main
+  File "/Users/kevinphan/Desktop/hackathons/syncs-bot-battle-hackathon/bots/default_bot.py", line 22, in main
     query = game.get_next_query()
   File "/Users/kevinphan/Desktop/hackathons/syncs-bot-battle-hackathon/.venv/lib/python3.14/site-packages/helper/game.py", line 16, in get_next_query
     query = self.connection.get_next_query()

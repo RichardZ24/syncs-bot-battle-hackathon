@@ -94,7 +94,6 @@ def calculate_move(query: QueryMovePlayer, memory: BotMemory) -> MovePlayer:
             cd <= frames_to_reach and player_masses[b.player_id] > mass) else mass
 
         is_prey = my_mass >= eff_mass * EAT_RATIO
-        # Mechanical Split Awareness
         is_split_target = (my_mass >= eff_mass *
                            SPLIT_RATIO) and can_physically_split
 
@@ -109,15 +108,13 @@ def calculate_move(query: QueryMovePlayer, memory: BotMemory) -> MovePlayer:
 
         enemy_wall_dist = min(b.pos[0], MAP_MAX -
                               b.pos[0], b.pos[1], MAP_MAX - b.pos[1])
-        cornered = enemy_wall_dist < 8.0 or heading_to_wall
-
+        cornered = enemy_wall_dist < 10.0 or heading_to_wall
         closure_rate = (dx * (vx - my_vx) + dy * (vy - my_vy)) / dist
 
-        # TACTICAL UPGRADE: The Kinematic Paradox Fix
-        # Drop aggro if we are mathematically slower and out of range
         if is_prey and not cornered:
             if is_split_target:
-                gap_to_split = dist - (my_r / 1.414 + SPLIT_JUMP + b.radius)
+                gap_to_split = dist - \
+                    (math.sqrt(my_mass / 2.0) + SPLIT_JUMP + b.radius)
                 if gap_to_split > 2.0 and closure_rate >= -0.05:
                     is_prey = False
                     is_split_target = False
@@ -126,12 +123,28 @@ def calculate_move(query: QueryMovePlayer, memory: BotMemory) -> MovePlayer:
                 if gap_to_eat > 1.0 and closure_rate >= -0.05:
                     is_prey = False
 
+        target_dir_x, target_dir_y = dx / dist, dy / dist
+        if is_prey and cornered:
+            # FIX: Properly unpack the velocity tuple
+            mag_v = math.hypot(vx, vy)
+            norm_vx, norm_vy = (
+                vx / mag_v, vy / mag_v) if mag_v > 0.01 else (0.0, 0.0)
+
+            target_dir_x = (target_dir_x * 0.7) + (norm_vx * 0.3)
+            target_dir_y = (target_dir_y * 0.7) + (norm_vy * 0.3)
+            mag = math.hypot(target_dir_x, target_dir_y)
+            if mag > 0.001:
+                target_dir_x /= mag
+                target_dir_y /= mag
+
         enemy_data.append({
             'x': b.pos[0], 'y': b.pos[1],
             'vx': vx, 'vy': vy,
             'dist': dist,
-            'dir_x': dx/dist,
-            'dir_y': dy/dist,
+            'dir_x': target_dir_x,
+            'dir_y': target_dir_y,
+            'raw_dx': dx / dist,
+            'raw_dy': dy / dist,
             'is_threat': eff_mass >= my_mass * EAT_RATIO,
             'is_split_threat': eff_mass >= my_mass * SPLIT_RATIO,
             'is_prey': is_prey,
@@ -146,16 +159,18 @@ def calculate_move(query: QueryMovePlayer, memory: BotMemory) -> MovePlayer:
     memory.velocities = {
         k: v for k, v in memory.velocities.items() if k in current_blob_ids}
 
-    NUM_RAYS = 32
+    NUM_RAYS = 64
     best_score = -float('inf')
     best_ray = memory.last_dir
     do_split = False
+
+    mass_aggression_multiplier = 1.0 + (my_mass / 200.0)
 
     for i in range(NUM_RAYS):
         angle = i * (2 * math.pi / NUM_RAYS)
         rx, ry = math.cos(angle), math.sin(angle)
         score = 0.0
-        chase_food_mult = 1.0
+        chase_food_mult = 1.0 * mass_aggression_multiplier
         ray_prey_score = 0.0
 
         score += (rx * memory.last_dir[0] + ry * memory.last_dir[1]) * 15.0
@@ -169,25 +184,29 @@ def calculate_move(query: QueryMovePlayer, memory: BotMemory) -> MovePlayer:
 
         for e in enemy_data:
             dot = rx * e['dir_x'] + ry * e['dir_y']
-            if dot > 0.3:
+            raw_dot = rx * e['raw_dx'] + ry * e['raw_dy']
+            if raw_dot > 0.3:
                 if e['is_threat']:
                     weight = 25000.0 if e['is_split_threat'] else 8000.0
-                    score -= (weight * dot) / max(1.0, e['dist'] ** 2)
+                    score -= (weight * raw_dot) / max(1.0, e['dist'] ** 2)
                 elif e['is_prey']:
                     if e['cornered']:
-                        add_score = (40000.0 * dot) / max(0.1, e['dist'])
+                        add_score = (
+                            50000.0 * dot * mass_aggression_multiplier) / max(0.1, e['dist'])
                         score += add_score
                         ray_prey_score += add_score
-                        chase_food_mult = max(chase_food_mult, 1.2)
+                        chase_food_mult = max(
+                            chase_food_mult, 1.5 * mass_aggression_multiplier)
                     else:
-                        add_score = (3000.0 * dot) / max(1.0, e['dist'])
+                        add_score = (
+                            4000.0 * dot * mass_aggression_multiplier) / max(1.0, e['dist'])
                         score += add_score
                         ray_prey_score += add_score
                         if dot > 0.85:
                             chase_food_mult = max(
-                                chase_food_mult, 3.0 if not e['is_split_target'] else 1.5)
+                                chase_food_mult, 4.0 if not e['is_split_target'] else 2.0)
                 else:
-                    score -= (500.0 * dot) / max(1.0, e['dist'] ** 2)
+                    score -= (500.0 * raw_dot) / max(1.0, e['dist'] ** 2)
 
         dist_x = (MAP_MAX - my_x) / rx if rx > 0 else (my_x / -
                                                        rx if rx < 0 else float('inf'))
@@ -205,12 +224,16 @@ def calculate_move(query: QueryMovePlayer, memory: BotMemory) -> MovePlayer:
         if my_r > 1.6 and query.visible_viruses:
             for v in query.visible_viruses:
                 if my_mass > (v.radius ** 2) * EAT_RATIO:
+                    # FIX: Corrected typo in variable name
                     vdx, vdy = v.pos[0] - my_x, v.pos[1] - my_y
                     along_dist = rx * vdx + ry * vdy
                     if 0 < along_dist < 30.0:
                         perp_dist = abs(rx * vdy - ry * vdx)
-                        if perp_dist < (my_r + v.radius + 1.0):
-                            score -= 500000.0 / max(0.1, along_dist ** 2)
+                        if perp_dist < (my_r + 0.8):
+                            if my_blob_count == MAX_BLOBS:
+                                score += 8000.0 / max(0.1, along_dist ** 2)
+                            else:
+                                score -= 500000.0 / max(0.1, along_dist ** 2)
 
         if query.visible_food:
             eat_radius = my_r + 0.15
@@ -221,7 +244,7 @@ def calculate_move(query: QueryMovePlayer, memory: BotMemory) -> MovePlayer:
                     perp_dist = abs(rx * fdy - ry * fdx)
                     if perp_dist < eat_radius:
                         accuracy_mult = 1.0 - (perp_dist / eat_radius)
-                        score += (60.0 * (1.0 + 2.0 * accuracy_mult)
+                        score += (75.0 * (1.0 + 2.0 * accuracy_mult)
                                   * chase_food_mult) / (along_dist + 1.0)
 
         if score > best_score:
@@ -230,7 +253,7 @@ def calculate_move(query: QueryMovePlayer, memory: BotMemory) -> MovePlayer:
 
     if can_physically_split:
         halved_mass = my_mass / 2.0
-        halved_r = my_r / 1.414
+        halved_r = math.sqrt(halved_mass)
 
         safe_to_split = True
         for e in enemy_data:
@@ -247,7 +270,7 @@ def calculate_move(query: QueryMovePlayer, memory: BotMemory) -> MovePlayer:
                     landing_x = my_x + best_ray[0] * (halved_r + SPLIT_JUMP)
                     landing_y = my_y + best_ray[1] * (halved_r + SPLIT_JUMP)
 
-                    if math.hypot(landing_x - ex_future, landing_y - ey_future) < (halved_r + e['r'] * 0.5):
+                    if math.hypot(landing_x - ex_future, landing_y - ey_future) < (halved_r - 0.2):
                         virus_blocked = False
                         if query.visible_viruses:
                             for v in query.visible_viruses:
@@ -258,7 +281,7 @@ def calculate_move(query: QueryMovePlayer, memory: BotMemory) -> MovePlayer:
                                     if 0 < vdot < (halved_r + SPLIT_JUMP + v.radius):
                                         perp = abs(
                                             best_ray[0] * vdy - best_ray[1] * vdx)
-                                        if perp < (v.radius + halved_r + 0.5):
+                                        if perp < (halved_r + 0.8):
                                             virus_blocked = True
                                             break
                         if not virus_blocked:
